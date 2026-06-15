@@ -12,6 +12,38 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st
+from packaging.version import Version as _V
+
+# st.image gained `use_container_width` in 1.33; older builds only accept
+# `use_column_width`.  st.button gained `use_container_width` in 1.30.
+# We detect once at import time and use the right kwarg everywhere.
+_ST_NEW = _V(st.__version__) >= _V("1.33.0")
+_ST_BTN_NEW = _V(st.__version__) >= _V("1.30.0")
+
+
+def _img(placeholder, frame, **kwargs):
+    """Show an image using whichever width arg this Streamlit version accepts."""
+    if _ST_NEW:
+        placeholder.image(frame, use_container_width=True, **kwargs)
+    else:
+        placeholder.image(frame, use_column_width=True, **kwargs)
+
+
+def _chart(container, fig, key=None):
+    """Show a Plotly chart with the right width argument."""
+    kw = {"use_container_width": True} if _ST_NEW else {"use_column_width": True}
+    if key:
+        kw["key"] = key
+    container.plotly_chart(fig, **kw)
+
+
+def _df(container, data):
+    """Show a dataframe with the right width argument."""
+    if _ST_NEW:
+        container.dataframe(data, use_container_width=True)
+    else:
+        container.dataframe(data)
+
 
 from feedback.audio import AudioFeedback
 from feedback.haptics import HapticController
@@ -104,7 +136,8 @@ def _build_sidebar() -> dict:
                 uploaded_path = tmp.name
 
         st.markdown("---")
-        run = st.button("Run navigation", type="primary", use_container_width=True)
+        run = st.button("Run navigation", type="primary",
+                         **{"use_container_width": True} if _ST_BTN_NEW else {})
 
     return dict(
         source_mode=source_mode,
@@ -201,7 +234,7 @@ def _render_live_tab() -> None:
 
             # Camera feed
             annotated = annotate_frame(frame, enriched)
-            camera_ph.image(bgr_to_rgb(annotated), channels="RGB", use_container_width=True)
+            _img(camera_ph, bgr_to_rgb(annotated), channels="RGB")
 
             # Derived values
             elapsed      = max(1e-6, time.perf_counter() - start)
@@ -242,11 +275,7 @@ def _render_live_tab() -> None:
             hap_r_ph.progress(signal.right_intensity, text=f"Right motor — {r_pct}%")
 
             # 270° sector chart
-            sector_ph.plotly_chart(
-                build_sector_figure(readings),
-                use_container_width=True,
-                key=f"sector_{frame_count}",
-            )
+            _chart(sector_ph, build_sector_figure(readings), key=f"sector_{frame_count}")
 
             # Session trend chart (appears after enough data)
             level_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -260,14 +289,10 @@ def _render_live_tab() -> None:
                 **{f"level_{k}": v for k, v in level_counts.items()},
             })
             if len(history) >= 5:
-                chart_ph.plotly_chart(
-                    build_session_chart(history),
-                    use_container_width=True,
-                    key=f"chart_{frame_count}",
-                )
+                _chart(chart_ph, build_session_chart(history), key=f"chart_{frame_count}")
 
             # Hidden detection table
-            table_ph.dataframe(detection_table_rows(enriched), use_container_width=True)
+            _df(table_ph, detection_table_rows(enriched))
 
             if cfg["source_mode"] == "Simulation":
                 time.sleep(0.03)
@@ -384,7 +409,7 @@ def _render_evaluation_tab() -> None:
     rc[3].metric("True Positives",   metrics.true_positives)
     rc[4].metric("FP / FN",          f"{metrics.false_positives} / {metrics.false_negatives}")
 
-    st.plotly_chart(_metrics_bar(metrics), use_container_width=True)
+    _chart(st, _metrics_bar(metrics))
 
     with st.expander("Box counts"):
         st.metric("Ground-truth boxes", len(gt))
