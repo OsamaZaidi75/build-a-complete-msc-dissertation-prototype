@@ -12,37 +12,27 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st
-from packaging.version import Version as _V
 
-# st.image gained `use_container_width` in 1.33; older builds only accept
-# `use_column_width`.  st.button gained `use_container_width` in 1.30.
-# We detect once at import time and use the right kwarg everywhere.
-_ST_NEW = _V(st.__version__) >= _V("1.33.0")
-_ST_BTN_NEW = _V(st.__version__) >= _V("1.30.0")
-
+# use_column_width=True works on every Streamlit version ever released.
+# use_container_width was added later and is not present in all builds.
+# We always use use_column_width so the app runs on any version >= 1.0.
 
 def _img(placeholder, frame, **kwargs):
-    """Show an image using whichever width arg this Streamlit version accepts."""
-    if _ST_NEW:
-        placeholder.image(frame, use_container_width=True, **kwargs)
-    else:
-        placeholder.image(frame, use_column_width=True, **kwargs)
+    """Display an image full-width, compatible with all Streamlit versions."""
+    placeholder.image(frame, use_column_width=True, **kwargs)
 
 
 def _chart(container, fig, key=None):
-    """Show a Plotly chart with the right width argument."""
-    kw = {"use_container_width": True} if _ST_NEW else {"use_column_width": True}
+    """Display a Plotly chart full-width, compatible with all Streamlit versions."""
+    kw = {"use_column_width": True}
     if key:
         kw["key"] = key
     container.plotly_chart(fig, **kw)
 
 
 def _df(container, data):
-    """Show a dataframe with the right width argument."""
-    if _ST_NEW:
-        container.dataframe(data, use_container_width=True)
-    else:
-        container.dataframe(data)
+    """Display a dataframe, compatible with all Streamlit versions."""
+    container.dataframe(data)
 
 
 from feedback.audio import AudioFeedback
@@ -136,8 +126,7 @@ def _build_sidebar() -> dict:
                 uploaded_path = tmp.name
 
         st.markdown("---")
-        run = st.button("Run navigation", type="primary",
-                         **{"use_container_width": True} if _ST_BTN_NEW else {})
+        run = st.button("Run navigation", type="primary")
 
     return dict(
         source_mode=source_mode,
