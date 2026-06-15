@@ -23,7 +23,6 @@ from ui.components import (
     build_session_chart,
     build_warning_level_chart,
     detection_table_rows,
-    haptic_bar,
 )
 from vision.annotator import annotate_frame, bgr_to_rgb
 from vision.camera import VideoSource, parse_source, require_cv2
@@ -31,39 +30,63 @@ from vision.config import ModelConfig
 from vision.detector import create_detector
 from vision.synthetic import make_simulation_frame
 
+_LEVEL_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "none": 0}
+
+_SHORT_DIRECTION = {
+    "path ahead is relatively clear": "Clear",
+    "prefer slight left": "Go left",
+    "prefer slight right": "Go right",
+    "slow down": "Slow down",
+}
+
 
 def main() -> None:
-    st.set_page_config(page_title="Assistive Navigation YOLO11", layout="wide")
+    st.set_page_config(
+        page_title="Assistive Navigation",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    # Minimal top-bar custom CSS — tighten padding, clean font
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 1rem; padding-bottom: 0.5rem; }
+        h1 { font-size: 1.4rem !important; margin-bottom: 0 !important; }
+        .stTabs [data-baseweb="tab"] { font-size: 0.9rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     tab_live, tab_eval, tab_about = st.tabs(["Live Navigation", "Evaluation", "About"])
 
     with tab_live:
         _render_live_tab()
-
     with tab_eval:
         _render_evaluation_tab()
-
     with tab_about:
         _render_about_tab()
 
 
 # ---------------------------------------------------------------------------
-# Live Navigation tab
+# Sidebar
 # ---------------------------------------------------------------------------
 
-def _render_live_tab() -> None:
-    st.header("AI-Powered Assistive Navigation System")
-    st.caption("YOLO11 obstacle awareness prototype for visually impaired users")
-
+def _build_sidebar() -> dict:
     with st.sidebar:
-        st.header("Configuration")
-        source_mode = st.selectbox("Source", ["Simulation", "Webcam", "Video file", "Upload video"])
-        model_path = st.text_input("YOLO11 model", value="yolo11n.pt")
-        confidence = st.slider("Confidence threshold", 0.05, 0.95, 0.35, 0.05)
-        use_mock = st.checkbox("Use simulation detector", value=source_mode == "Simulation")
-        audio_enabled = st.checkbox("Enable text-to-speech", value=False)
-        max_frames = st.slider("Frames per run", 30, 900, 180, 30)
-        video_path = None
+        st.markdown("## Configuration")
+        source_mode = st.selectbox(
+            "Input source",
+            ["Simulation", "Webcam", "Video file", "Upload video"],
+        )
+        st.markdown("---")
+        model_path  = st.text_input("YOLO11 model", value="yolo11n.pt")
+        confidence  = st.slider("Confidence", 0.05, 0.95, 0.35, 0.05)
+        use_mock    = st.checkbox("Simulation detector", value=(source_mode == "Simulation"))
+        audio_on    = st.checkbox("Text-to-speech", value=False)
+        max_frames  = st.slider("Max frames", 30, 900, 180, 30)
+
+        video_path   = None
         uploaded_path = None
 
         if source_mode == "Video file":
@@ -80,116 +103,173 @@ def _render_live_tab() -> None:
                 tmp.close()
                 uploaded_path = tmp.name
 
-        run = st.button("Run navigation", type="primary")
+        st.markdown("---")
+        run = st.button("Run navigation", type="primary", use_container_width=True)
 
-    camera_placeholder = st.empty()
-    status_cols = st.columns(5)
-    table_placeholder = st.empty()
-    warning_placeholder = st.empty()
+    return dict(
+        source_mode=source_mode,
+        model_path=model_path,
+        confidence=confidence,
+        use_mock=use_mock,
+        audio_on=audio_on,
+        max_frames=max_frames,
+        video_path=video_path,
+        uploaded_path=uploaded_path,
+        run=run,
+    )
 
-    col_sector, col_chart = st.columns([1, 1])
-    sector_placeholder = col_sector.empty()
-    chart_placeholder = col_chart.empty()
-    warning_chart_placeholder = col_chart.empty()
 
-    if not run:
-        st.info("Choose an input source and press **Run navigation** to start.")
+# ---------------------------------------------------------------------------
+# Live Navigation tab
+# ---------------------------------------------------------------------------
+
+def _render_live_tab() -> None:
+    st.markdown("# Assistive Navigation System")
+    cfg = _build_sidebar()
+
+    if not cfg["run"]:
+        _show_idle_screen()
         return
 
-    # Build source iterator
+    # ── Build layout placeholders ────────────────────────────────────────
+    camera_ph = st.empty()
+
+    col_info, col_sector = st.columns([5, 6])
+
+    with col_info:
+        mc = st.columns(2)
+        fps_ph  = mc[0].empty()
+        near_ph = mc[1].empty()
+        det_ph  = mc[0].empty()
+        dir_ph  = mc[1].empty()
+
+        st.markdown("---")
+        warn_ph = st.empty()
+        st.markdown("---")
+        st.caption("Haptic feedback")
+        hap_l_ph = st.empty()
+        hap_r_ph = st.empty()
+
+    with col_sector:
+        sector_ph = st.empty()
+
+    chart_ph = st.empty()
+
+    with st.expander("Detection log", expanded=False):
+        table_ph = st.empty()
+
+    # ── Initialise pipeline ──────────────────────────────────────────────
     try:
-        source, frame_iterator = _build_frame_iterator(
-            source_mode, video_path, uploaded_path, max_frames
+        source, frame_iter = _build_frame_iterator(
+            cfg["source_mode"], cfg["video_path"], cfg["uploaded_path"], cfg["max_frames"]
         )
     except RuntimeError as exc:
         st.error(f"Could not open video source: {exc}")
         return
 
     try:
-        cv2 = require_cv2()
+        require_cv2()
     except RuntimeError as exc:
         st.error(str(exc))
         return
 
-    detector = create_detector(
-        ModelConfig(model_path=model_path, confidence=confidence, use_mock=use_mock),
+    detector   = create_detector(
+        ModelConfig(model_path=cfg["model_path"], confidence=cfg["confidence"], use_mock=cfg["use_mock"]),
         fallback_to_mock=True,
     )
     nav_engine = NavigationEngine()
-    haptics = HapticController()
-    simulator = VirtualNavigationSimulator()
-    audio = AudioFeedback(enabled=audio_enabled)
-    logger = DetectionLogger(ROOT / "logs" / "navigation_events.csv")
+    haptics    = HapticController()
+    simulator  = VirtualNavigationSimulator()
+    audio      = AudioFeedback(enabled=cfg["audio_on"])
+    logger     = DetectionLogger(ROOT / "logs" / "navigation_events.csv")
 
-    session_history: list[dict[str, object]] = []
-    start = time.perf_counter()
-    frame_count = 0
-    total_detections = 0
+    history: list[dict] = []
+    start        = time.perf_counter()
+    frame_count  = 0
+    total_dets   = 0
 
+    # ── Main loop ────────────────────────────────────────────────────────
     try:
-        for frame_count, frame in frame_iterator:
+        for frame_count, frame in frame_iter:
             detections = detector.detect(frame)
-            enriched = nav_engine.enrich(detections, frame.shape)
-            signal = haptics.generate(enriched)
+            enriched   = nav_engine.enrich(detections, frame.shape)
+            signal     = haptics.generate(enriched)
             logger.log(enriched)
-            spoken = audio.speak_detections(enriched)
-            readings = simulator.build_awareness(enriched, frame.shape[1])
-            direction = simulator.suggested_direction(readings)
+            spoken     = audio.speak_detections(enriched)
+            readings   = simulator.build_awareness(enriched, frame.shape[1])
+            direction  = simulator.suggested_direction(readings)
 
+            # Camera feed
             annotated = annotate_frame(frame, enriched)
-            camera_placeholder.image(bgr_to_rgb(annotated), channels="RGB", use_container_width=True)
+            camera_ph.image(bgr_to_rgb(annotated), channels="RGB", use_container_width=True)
 
-            elapsed = max(1e-6, time.perf_counter() - start)
-            fps = (frame_count + 1) / elapsed
-            total_detections += len(enriched)
-            nearest = min(
+            # Derived values
+            elapsed      = max(1e-6, time.perf_counter() - start)
+            fps          = (frame_count + 1) / elapsed
+            total_dets  += len(enriched)
+            nearest      = min(
                 (d.estimated_distance for d in enriched if d.estimated_distance is not None),
                 default=None,
             )
-            active_warnings = [d.message for d in enriched if d.message]
-
-            status_cols[0].metric("FPS", f"{fps:.1f}")
-            status_cols[1].metric("Detections", len(enriched))
-            status_cols[2].metric("Nearest", f"{nearest:.2f} m" if nearest is not None else "clear")
-            status_cols[3].metric("Haptic", signal.as_text())
-            status_cols[4].metric("Direction", direction.capitalize())
-
-            table_placeholder.dataframe(detection_table_rows(enriched), use_container_width=True)
-
-            warning_text = " | ".join(spoken or active_warnings[:3]) or "No active warning"
-            warning_placeholder.warning(f"{warning_text}\n\n{haptic_bar(signal)}")
-
-            sector_placeholder.plotly_chart(
-                build_sector_figure(readings), use_container_width=True, key=f"sector_{frame_count}"
+            active_msgs  = [d.message for d in enriched if d.message]
+            top_level    = max(
+                (d.warning_level for d in enriched),
+                key=lambda lv: _LEVEL_ORDER.get(lv, 0),
+                default="none",
             )
 
-            # Accumulate session history for charting
-            level_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+            # 2x2 metrics
+            fps_ph.metric("FPS",        f"{fps:.0f}")
+            near_ph.metric("Nearest",   f"{nearest:.1f} m" if nearest is not None else "clear")
+            det_ph.metric("Detections", len(enriched))
+            dir_ph.metric("Direction",  _SHORT_DIRECTION.get(direction, direction.capitalize()))
+
+            # Warning banner — colour-coded, only shows when relevant
+            msg = " | ".join(spoken or active_msgs[:2])
+            if msg and top_level == "critical":
+                warn_ph.error(f"STOP — {msg}")
+            elif msg and top_level == "high":
+                warn_ph.warning(f"Warning — {msg}")
+            elif msg and top_level == "medium":
+                warn_ph.info(f"Caution — {msg}")
+            else:
+                warn_ph.success("Path clear")
+
+            # Haptic progress bars
+            l_pct = int(signal.left_intensity * 100)
+            r_pct = int(signal.right_intensity * 100)
+            hap_l_ph.progress(signal.left_intensity, text=f"Left motor — {l_pct}%")
+            hap_r_ph.progress(signal.right_intensity, text=f"Right motor — {r_pct}%")
+
+            # 270° sector chart
+            sector_ph.plotly_chart(
+                build_sector_figure(readings),
+                use_container_width=True,
+                key=f"sector_{frame_count}",
+            )
+
+            # Session trend chart (appears after enough data)
+            level_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
             for d in enriched:
                 if d.warning_level in level_counts:
                     level_counts[d.warning_level] += 1
-            session_history.append(
-                {
-                    "frame": frame_count,
-                    "count": len(enriched),
-                    "nearest": nearest if nearest is not None else 0.0,
-                    **{f"level_{k}": v for k, v in level_counts.items()},
-                }
-            )
-
-            if len(session_history) > 1:
-                chart_placeholder.plotly_chart(
-                    build_session_chart(session_history),
+            history.append({
+                "frame":   frame_count,
+                "count":   len(enriched),
+                "nearest": nearest if nearest is not None else 0.0,
+                **{f"level_{k}": v for k, v in level_counts.items()},
+            })
+            if len(history) >= 5:
+                chart_ph.plotly_chart(
+                    build_session_chart(history),
                     use_container_width=True,
                     key=f"chart_{frame_count}",
                 )
-                warning_chart_placeholder.plotly_chart(
-                    build_warning_level_chart(session_history),
-                    use_container_width=True,
-                    key=f"warnlevel_{frame_count}",
-                )
 
-            if source_mode == "Simulation":
+            # Hidden detection table
+            table_ph.dataframe(detection_table_rows(enriched), use_container_width=True)
+
+            if cfg["source_mode"] == "Simulation":
                 time.sleep(0.03)
 
     finally:
@@ -198,35 +278,41 @@ def _render_live_tab() -> None:
 
     # Session summary
     processed = frame_count + 1
-    elapsed_total = max(1e-6, time.perf_counter() - start)
-    avg_fps = processed / elapsed_total
+    avg_fps   = processed / max(1e-6, time.perf_counter() - start)
     st.success(
-        f"Processed **{processed}** frames at **{avg_fps:.1f} FPS**. "
-        f"Total detections: **{total_detections}**. "
-        f"CSV log saved to `logs/navigation_events.csv`."
+        f"Done — **{processed}** frames at **{avg_fps:.1f} FPS** · "
+        f"**{total_dets}** total detections · log saved to `logs/navigation_events.csv`"
     )
 
 
-def _build_frame_iterator(
-    source_mode: str,
-    video_path: str | None,
-    uploaded_path: str | None,
-    max_frames: int,
-) -> tuple[VideoSource | None, object]:
+def _show_idle_screen() -> None:
+    st.markdown("---")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Input sources", "4",  "Webcam / Video / Upload / Simulation")
+    c2.metric("AI model",      "YOLO11n", "Real-time detection")
+    c3.metric("Object classes", "7", "Person, chair, stairs…")
+    c4.metric("Feedback modes", "3", "Visual · Haptic · Audio")
+    st.info("Select an input source in the sidebar, then press **Run navigation**.")
+
+
+# ---------------------------------------------------------------------------
+# Frame iterator helpers
+# ---------------------------------------------------------------------------
+
+def _build_frame_iterator(source_mode, video_path, uploaded_path, max_frames):
     if source_mode == "Webcam":
-        source = VideoSource(0)
-        return source, source.frames(max_frames=max_frames)
+        src = VideoSource(0)
+        return src, src.frames(max_frames=max_frames)
     if source_mode == "Video file":
-        source = VideoSource(parse_source(video_path or "0"))
-        return source, source.frames(max_frames=max_frames)
+        src = VideoSource(parse_source(video_path or "0"))
+        return src, src.frames(max_frames=max_frames)
     if source_mode == "Upload video" and uploaded_path:
-        source = VideoSource(uploaded_path)
-        return source, source.frames(max_frames=max_frames)
-    # Simulation
-    return None, _simulation_frames(max_frames=max_frames)
+        src = VideoSource(uploaded_path)
+        return src, src.frames(max_frames=max_frames)
+    return None, _sim_frames(max_frames)
 
 
-def _simulation_frames(max_frames: int):
+def _sim_frames(max_frames: int):
     for idx in range(max_frames):
         yield idx, make_simulation_frame(idx)
 
@@ -236,11 +322,8 @@ def _simulation_frames(max_frames: int):
 # ---------------------------------------------------------------------------
 
 def _render_evaluation_tab() -> None:
-    st.header("Detection Evaluation")
-    st.markdown(
-        "Upload a ground-truth CSV and a predictions CSV to compute "
-        "precision, recall, and F1 for this run."
-    )
+    st.markdown("# Detection Evaluation")
+    st.caption("Measure precision, recall, and F1 against ground-truth bounding-box CSVs.")
 
     col_gt, col_pred = st.columns(2)
     with col_gt:
@@ -250,9 +333,7 @@ def _render_evaluation_tab() -> None:
             key="gt_upload",
             help="Columns: frame_id, object, xmin, ymin, xmax, ymax",
         )
-        st.caption("Or use the bundled sample:")
-        use_sample_gt = st.checkbox("Use sample ground-truth", value=False)
-
+        use_sample_gt = st.checkbox("Use bundled sample", key="use_sample_gt")
     with col_pred:
         pred_file = st.file_uploader(
             "Predictions CSV",
@@ -260,13 +341,11 @@ def _render_evaluation_tab() -> None:
             key="pred_upload",
             help="Columns: frame_id, object, xmin, ymin, xmax, ymax, confidence",
         )
-        st.caption("Or use the bundled sample:")
-        use_sample_pred = st.checkbox("Use sample predictions", value=False)
+        use_sample_pred = st.checkbox("Use bundled sample", key="use_sample_pred")
 
     iou_threshold = st.slider("IoU threshold", 0.1, 0.9, 0.5, 0.05)
-    evaluate_btn = st.button("Evaluate", type="primary")
 
-    if not evaluate_btn:
+    if not st.button("Evaluate", type="primary"):
         return
 
     try:
@@ -275,71 +354,62 @@ def _render_evaluation_tab() -> None:
         st.error(f"Evaluation module error: {exc}")
         return
 
-    gt_path = ROOT / "samples" / "sample_ground_truth.csv" if use_sample_gt else None
-    pred_path = ROOT / "samples" / "sample_predictions.csv" if use_sample_pred else None
+    gt_path   = ROOT / "samples" / "sample_ground_truth.csv" if use_sample_gt else None
+    pred_path = ROOT / "samples" / "sample_predictions.csv"  if use_sample_pred else None
 
     try:
         if gt_file is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-                tmp.write(gt_file.read())
-                gt_path = Path(tmp.name)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+            tmp.write(gt_file.read()); tmp.close()
+            gt_path = Path(tmp.name)
         if pred_file is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-                tmp.write(pred_file.read())
-                pred_path = Path(tmp.name)
-
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+            tmp.write(pred_file.read()); tmp.close()
+            pred_path = Path(tmp.name)
         if gt_path is None or pred_path is None:
-            st.warning("Please supply both a ground-truth and a predictions CSV (or tick 'Use sample').")
+            st.warning("Supply both CSVs or tick 'Use bundled sample'.")
             return
-
-        gt = load_box_csv(gt_path)
-        preds = load_box_csv(pred_path)
+        gt      = load_box_csv(gt_path)
+        preds   = load_box_csv(pred_path)
         metrics = evaluate_precision_recall(gt, preds, iou_threshold=iou_threshold)
-
     except Exception as exc:
         st.error(f"Evaluation failed: {exc}")
         return
 
-    res_cols = st.columns(5)
-    res_cols[0].metric("Precision", f"{metrics.precision:.3f}")
-    res_cols[1].metric("Recall", f"{metrics.recall:.3f}")
-    res_cols[2].metric("F1", f"{metrics.f1:.3f}")
-    res_cols[3].metric("True Positives", metrics.true_positives)
-    res_cols[4].metric("False Positives / FN", f"{metrics.false_positives} / {metrics.false_negatives}")
-
     st.markdown("---")
-    st.subheader("Metric Bar Chart")
-    _render_metrics_bar(metrics)
+    rc = st.columns(5)
+    rc[0].metric("Precision",        f"{metrics.precision:.3f}")
+    rc[1].metric("Recall",           f"{metrics.recall:.3f}")
+    rc[2].metric("F1",               f"{metrics.f1:.3f}")
+    rc[3].metric("True Positives",   metrics.true_positives)
+    rc[4].metric("FP / FN",          f"{metrics.false_positives} / {metrics.false_negatives}")
 
-    st.subheader("Ground-truth boxes loaded")
-    st.metric("Count", len(gt))
-    st.subheader("Prediction boxes loaded")
-    st.metric("Count", len(preds))
+    st.plotly_chart(_metrics_bar(metrics), use_container_width=True)
+
+    with st.expander("Box counts"):
+        st.metric("Ground-truth boxes", len(gt))
+        st.metric("Prediction boxes",   len(preds))
 
 
-def _render_metrics_bar(metrics) -> None:
+def _metrics_bar(metrics):
     import plotly.graph_objects as go
-
-    fig = go.Figure(
-        data=[
-            go.Bar(
-                x=["Precision", "Recall", "F1"],
-                y=[metrics.precision, metrics.recall, metrics.f1],
-                marker_color=["#4e9af1", "#f77f00", "#2a9d8f"],
-                text=[f"{v:.3f}" for v in [metrics.precision, metrics.recall, metrics.f1]],
-                textposition="outside",
-            )
-        ]
-    )
+    fig = go.Figure(go.Bar(
+        x=["Precision", "Recall", "F1"],
+        y=[metrics.precision, metrics.recall, metrics.f1],
+        marker_color=["#4e9af1", "#f77f00", "#2a9d8f"],
+        text=[f"{v:.3f}" for v in [metrics.precision, metrics.recall, metrics.f1]],
+        textposition="outside",
+    ))
     fig.update_layout(
-        height=280,
+        height=260,
         margin=dict(l=10, r=10, t=20, b=10),
-        yaxis=dict(range=[0, 1.1]),
-        plot_bgcolor="#1e2128",
-        paper_bgcolor="#1e2128",
-        font=dict(color="#cdd6f4"),
+        yaxis=dict(range=[0, 1.15], showgrid=False),
+        xaxis=dict(showgrid=False),
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font=dict(color="#fafafa", size=14),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -347,63 +417,57 @@ def _render_metrics_bar(metrics) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_about_tab() -> None:
-    st.header("About this Prototype")
-    st.markdown(
-        """
-This is an MSc dissertation prototype demonstrating **AI-powered assistive navigation** for
-visually impaired users. The system uses YOLO11 real-time object detection and a spatial reasoning
-pipeline to generate directional warnings, simulated haptic signals, and text-to-speech alerts.
+    st.markdown("# About this Prototype")
+    st.markdown("""
+An MSc dissertation prototype for **AI-powered assistive navigation** for visually impaired users.
+YOLO11 detects obstacles in real time; a spatial pipeline converts detections into
+directional warnings, haptic signals, and spoken alerts.
 
-### System Components
+---
+
+### System modules
 
 | Module | Purpose |
 |---|---|
 | `vision/` | YOLO11 detector, webcam/video input, frame annotation |
-| `navigation/` | Zone assignment, monocular distance estimation, warning rules, 270° awareness |
-| `feedback/` | Left/right haptic simulation, audio (pyttsx3), CSV event logging |
-| `ui/` | Streamlit dashboard (this app) |
-| `evaluation/` | Precision/recall IoU matching, latency/FPS benchmark |
-| `scripts/` | CLI runner, synthetic sample video generator |
+| `navigation/` | Zone assignment (L/C/R), distance estimation, warning rules, 270° awareness |
+| `feedback/` | Haptic simulation, pyttsx3 audio, CSV logging |
+| `ui/` | This Streamlit dashboard |
+| `evaluation/` | IoU precision/recall, latency/FPS benchmark |
+| `scripts/` | CLI runner, synthetic video generator |
 
-### Warning Levels
+---
 
-| Level | Distance threshold |
-|---|---|
-| **Critical** | ≤ 1.2 m (≤ 0.95 m in centre zone) |
-| **High** | ≤ 2.0 m (≤ 1.75 m in centre zone) |
-| **Medium** | ≤ 3.5 m |
-| **Low** | > 3.5 m |
+### Warning levels
 
-### Haptic Mapping
+| Level | Distance | Colour | Audio |
+|---|---|---|---|
+| Critical | ≤ 1.2 m | Red | Yes |
+| High | ≤ 2.0 m | Orange | Yes |
+| Medium | ≤ 3.5 m | Yellow | Yes |
+| Low | > 3.5 m | Green | No |
 
-- **Left zone** → left vibration motor
-- **Right zone** → right vibration motor
-- **Centre zone** → both motors
-- Closer obstacle → higher intensity (0–100 %)
+Centre-zone obstacles escalate one level earlier (−0.25 m bias).
 
-### 270° Environmental Awareness
+---
 
-The polar sector chart extends the 90° forward camera field to a simulated 270° arc.
-Central sectors are driven by live detections; peripheral sectors show virtual awareness
-for dissertation UI design purposes.
+### Haptic mapping
 
-### Evaluation
+- Left zone obstacle → left motor
+- Right zone obstacle → right motor
+- Centre zone obstacle → both motors
+- Intensity = `1 − distance / 5 m` clamped to 10–100 %
 
-Use the **Evaluation** tab to compute precision, recall, and F1-score from bounding-box
-CSV files. Sample files are in `samples/` and were generated by
-`scripts/generate_sample_videos.py`.
+---
 
-### Dissertation Scope
+### Dissertation scope
 
 Distance values are **relative monocular estimates** from bounding-box scale and vertical
-position — not calibrated metric depth. This is intentional for a single RGB camera
-without LiDAR or stereo. Values are useful for hazard ranking and comparative warnings.
-        """
-    )
-    st.markdown("---")
+position — not calibrated metric depth. No LiDAR or stereo camera is used.
+Values are appropriate for hazard ranking in a dissertation demonstration context.
+    """)
     st.caption(
-        "Prototype built for MSc research purposes. "
-        "YOLO11 weights © Ultralytics. "
+        "YOLO11 weights by Ultralytics. "
         "Not for clinical or safety-critical deployment."
     )
 
