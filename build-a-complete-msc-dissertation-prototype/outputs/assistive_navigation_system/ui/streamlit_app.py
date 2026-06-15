@@ -24,10 +24,7 @@ def _img(placeholder, frame, **kwargs):
 
 def _chart(container, fig, key=None):
     """Display a Plotly chart full-width, compatible with all Streamlit versions."""
-    kw = {"use_column_width": True}
-    if key:
-        kw["key"] = key
-    container.plotly_chart(fig, **kw)
+    container.plotly_chart(fig, use_column_width=True)
 
 
 def _df(container, data):

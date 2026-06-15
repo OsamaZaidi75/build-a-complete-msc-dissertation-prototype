@@ -75,17 +75,19 @@ def build_sector_figure(readings: list[SectorReading]):
             )
         ]
     )
+    # angularaxis `range` is not supported in older Plotly versions — omit it.
+    # We achieve the 270° arc by rotating the axis so the gap falls at the bottom.
     fig.update_layout(
-        height=360,
+        height=340,
         margin=dict(l=20, r=20, t=30, b=20),
         polar=dict(
             radialaxis=dict(visible=False, range=[0, 1]),
             angularaxis=dict(
                 rotation=90,
                 direction="clockwise",
-                range=[-135, 135],
                 tickmode="array",
                 tickvals=[-135, -90, -45, 0, 45, 90, 135],
+                ticktext=["135°L", "90°L", "45°L", "Ahead", "45°R", "90°R", "135°R"],
             ),
         ),
         showlegend=False,
