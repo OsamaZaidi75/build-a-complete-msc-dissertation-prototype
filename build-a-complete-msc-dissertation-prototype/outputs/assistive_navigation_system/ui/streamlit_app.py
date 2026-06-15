@@ -91,6 +91,24 @@ def main() -> None:
 # Sidebar
 # ---------------------------------------------------------------------------
 
+def _scan_cameras() -> list[tuple[int, str]]:
+    """Try indices 0–9 and return (index, label) for every camera that opens.
+    Falls back to [(0,'Camera 0')] if cv2 is not yet installed.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return [(0, "Camera 0 (default)")]
+
+    found = []
+    for idx in range(10):
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if hasattr(cv2, "CAP_DSHOW") else 0)
+        if cap is not None and cap.isOpened():
+            found.append((idx, f"Camera {idx}"))
+            cap.release()
+    return found if found else [(0, "Camera 0 (default)")]
+
+
 def _build_sidebar() -> dict:
     with st.sidebar:
         st.markdown("## Configuration")
@@ -105,10 +123,24 @@ def _build_sidebar() -> dict:
         audio_on    = st.checkbox("Text-to-speech", value=False)
         max_frames  = st.slider("Max frames", 30, 900, 180, 30)
 
-        video_path   = None
+        video_path    = None
         uploaded_path = None
+        webcam_index  = 0
 
-        if source_mode == "Video file":
+        if source_mode == "Webcam":
+            cameras = _scan_cameras()
+            if len(cameras) == 1:
+                webcam_index = cameras[0][0]
+                st.info(f"Found: {cameras[0][1]}")
+            else:
+                labels = [label for _, label in cameras]
+                choice = st.selectbox("Select camera", labels)
+                webcam_index = cameras[labels.index(choice)][0]
+            st.caption(
+                "DroidCam: make sure the DroidCam desktop app is running "
+                "and connected **before** pressing Run."
+            )
+        elif source_mode == "Video file":
             video_path = st.text_input(
                 "Video path",
                 value=str(ROOT / "samples" / "left_person_right_vehicle.avi"),
@@ -134,6 +166,7 @@ def _build_sidebar() -> dict:
         max_frames=max_frames,
         video_path=video_path,
         uploaded_path=uploaded_path,
+        webcam_index=webcam_index,
         run=run,
     )
 
@@ -180,7 +213,8 @@ def _render_live_tab() -> None:
     # ── Initialise pipeline ──────────────────────────────────────────────
     try:
         source, frame_iter = _build_frame_iterator(
-            cfg["source_mode"], cfg["video_path"], cfg["uploaded_path"], cfg["max_frames"]
+            cfg["source_mode"], cfg["video_path"], cfg["uploaded_path"],
+            cfg["max_frames"], cfg["webcam_index"],
         )
     except RuntimeError as exc:
         st.error(f"Could not open video source: {exc}")
@@ -310,9 +344,9 @@ def _show_idle_screen() -> None:
 # Frame iterator helpers
 # ---------------------------------------------------------------------------
 
-def _build_frame_iterator(source_mode, video_path, uploaded_path, max_frames):
+def _build_frame_iterator(source_mode, video_path, uploaded_path, max_frames, webcam_index=0):
     if source_mode == "Webcam":
-        src = VideoSource(0)
+        src = VideoSource(webcam_index)
         return src, src.frames(max_frames=max_frames)
     if source_mode == "Video file":
         src = VideoSource(parse_source(video_path or "0"))
