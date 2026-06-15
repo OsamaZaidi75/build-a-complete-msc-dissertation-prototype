@@ -1,0 +1,2 @@
+frame_id,object,xmin,ymin,xmax,ymax,confidence
+0,person,100,160,220,460,1.0

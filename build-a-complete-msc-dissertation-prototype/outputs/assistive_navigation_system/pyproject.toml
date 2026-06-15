@@ -1,0 +1,14 @@
+[project]
+name = "assistive-navigation-system"
+version = "0.1.0"
+description = "MSc dissertation prototype for YOLO11 assistive navigation and obstacle awareness."
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

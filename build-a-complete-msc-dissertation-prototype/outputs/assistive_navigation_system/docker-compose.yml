@@ -1,0 +1,10 @@
+services:
+  assistive-navigation:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./logs:/app/logs
+      - ./samples:/app/samples
+    environment:
+      - YOLO_MODEL=yolo11n.pt

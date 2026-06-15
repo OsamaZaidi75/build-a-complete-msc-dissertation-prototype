@@ -1,0 +1,16 @@
+classDiagram
+    class Detection
+    class BBox
+    class YOLOv11ObstacleDetector
+    class NavigationEngine
+    class HapticController
+    class AudioFeedback
+    class DetectionLogger
+    class VirtualNavigationSimulator
+    Detection --> BBox
+    YOLOv11ObstacleDetector --> Detection
+    NavigationEngine --> Detection
+    HapticController --> Detection
+    AudioFeedback --> Detection
+    DetectionLogger --> Detection
+    VirtualNavigationSimulator --> Detection

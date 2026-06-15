@@ -1,0 +1,13 @@
+flowchart LR
+    Input["Webcam or Video File"] --> Capture["vision.camera.VideoSource"]
+    Capture --> Detector["vision.detector.YOLOv11ObstacleDetector"]
+    Detector --> Nav["navigation.engine.NavigationEngine"]
+    Nav --> Haptic["feedback.haptics.HapticController"]
+    Nav --> Audio["feedback.audio.AudioFeedback"]
+    Nav --> Logger["feedback.logger.DetectionLogger"]
+    Nav --> Virtual["navigation.virtual_270.VirtualNavigationSimulator"]
+    Detector --> Annotator["vision.annotator"]
+    Annotator --> UI["ui.streamlit_app Dashboard"]
+    Virtual --> UI
+    Haptic --> UI
+    Logger --> CSV["logs/navigation_events.csv"]
