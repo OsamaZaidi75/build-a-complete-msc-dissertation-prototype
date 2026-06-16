@@ -1,7 +1,7 @@
 """Streamlit dashboard for the assistive navigation prototype.
 
-Supports browser camera (WebRTC), video upload, video file, snapshot fallback,
-and simulation modes.  Designed for remote hosting (Streamlit Cloud, VPS).
+Supports browser camera (WebRTC), video upload, video file, and simulation
+modes.  Designed for remote hosting (Streamlit Cloud, VPS).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st
 
-# use_column_width=True works on every Streamlit version ever released.
+
 def _img(placeholder, frame, **kwargs):
     """Display an image full-width, compatible with all Streamlit versions."""
     placeholder.image(frame, use_column_width=True, **kwargs)
@@ -46,10 +46,17 @@ from ui.components import (
     detection_table_rows,
 )
 from vision.annotator import annotate_frame, bgr_to_rgb
-from vision.camera import VideoSource, parse_source, require_cv2
 from vision.config import ModelConfig
 from vision.detector import create_detector
 from vision.synthetic import make_simulation_frame
+
+# Lazy cv2 import — not available on all cloud environments
+def _import_cv2():
+    try:
+        import cv2
+        return cv2
+    except ImportError:
+        return None
 
 # Optional WebRTC import
 _WEBRTC_AVAILABLE = False
@@ -122,8 +129,12 @@ def _build_sidebar() -> dict:
         source_options = []
         if _WEBRTC_AVAILABLE:
             source_options.append("Browser Camera")
-        source_options.append("Browser Camera (Snapshot)")
-        source_options.extend(["Simulation", "Video file", "Upload video"])
+        source_options.append("Simulation")
+        cv2 = _import_cv2()
+        if cv2 is not None:
+            source_options.extend(["Video file", "Upload video"])
+        else:
+            source_options.append("Upload video")
 
         source_mode = st.selectbox("Input source", source_options)
         st.markdown("---")
@@ -138,13 +149,8 @@ def _build_sidebar() -> dict:
 
         if source_mode == "Browser Camera":
             st.caption(
-                "Uses your browser's camera via WebRTC. "
+                "📹 Uses your device camera via WebRTC. "
                 "Grant camera permission when prompted."
-            )
-        elif source_mode == "Browser Camera (Snapshot)":
-            st.caption(
-                "Captures individual frames from your browser camera. "
-                "Works without WebRTC support."
             )
         elif source_mode == "Video file":
             video_path = st.text_input(
@@ -186,8 +192,6 @@ def _render_live_tab() -> None:
 
     if cfg["source_mode"] == "Browser Camera":
         _render_live_webrtc(cfg)
-    elif cfg["source_mode"] == "Browser Camera (Snapshot)":
-        _render_live_snapshot(cfg)
     elif cfg["run"]:
         _render_live_synchronous(cfg)
     else:
@@ -195,17 +199,20 @@ def _render_live_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WebRTC browser camera mode
+# WebRTC browser camera mode (LIVE STREAMING)
 # ---------------------------------------------------------------------------
 
 def _render_live_webrtc(cfg: dict) -> None:
     """Live navigation using browser camera via WebRTC."""
 
     if not _WEBRTC_AVAILABLE:
-        st.error("streamlit-webrtc is not installed. Run `pip install streamlit-webrtc av`.")
+        st.error(
+            "⚠️ `streamlit-webrtc` is not installed. "
+            "Add it to requirements.txt: `streamlit-webrtc>=0.47.0`"
+        )
         return
 
-    st.info("Click **START** below to begin streaming your browser camera.")
+    st.info("👁️ Click **START** to begin real-time obstacle detection from your camera.")
 
     # Create the WebRTC streamer
     rtc_config = RTCConfiguration(iceServers=_ICE_SERVERS)
@@ -232,7 +239,12 @@ def _render_live_webrtc(cfg: dict) -> None:
     if ctx.state.playing and ctx.video_processor:
         _render_webrtc_dashboard(ctx, cfg)
     elif not ctx.state.playing:
-        _show_idle_screen()
+        st.markdown("---")
+        st.markdown(
+            "**How it works:** Your browser camera streams video frames to the server. "
+            "YOLO11 detects obstacles in real time, and the annotated feed is returned "
+            "back to you with zone markers, distance estimates, and warnings."
+        )
 
 
 def _render_webrtc_dashboard(ctx, cfg: dict) -> None:
@@ -300,13 +312,13 @@ def _render_webrtc_dashboard(ctx, cfg: dict) -> None:
         # Warning banner
         msg = " | ".join(active_msgs[:2])
         if msg and top_level == "critical":
-            warn_ph.error(f"STOP — {msg}")
+            warn_ph.error(f"🛑 STOP — {msg}")
         elif msg and top_level == "high":
-            warn_ph.warning(f"Warning — {msg}")
+            warn_ph.warning(f"⚠️ Warning — {msg}")
         elif msg and top_level == "medium":
-            warn_ph.info(f"Caution — {msg}")
+            warn_ph.info(f"ℹ️ Caution — {msg}")
         else:
-            warn_ph.success("Path clear")
+            warn_ph.success("✅ Path clear")
 
         # Haptic progress bars
         if signal is not None:
@@ -341,105 +353,9 @@ def _render_webrtc_dashboard(ctx, cfg: dict) -> None:
         pending = audio.drain_pending()
         inject_browser_tts(pending)
 
-    # Auto-refresh to keep metrics updating
+    # Auto-refresh to keep metrics updating while camera is streaming
     time.sleep(0.3)
     st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# Browser Camera (Snapshot) fallback
-# ---------------------------------------------------------------------------
-
-def _render_live_snapshot(cfg: dict) -> None:
-    """Fallback camera mode using st.camera_input (frame-by-frame capture)."""
-
-    st.info("Take snapshots from your browser camera for obstacle detection.")
-
-    camera_image = st.camera_input("Capture frame")
-
-    if camera_image is None:
-        _show_idle_screen()
-        return
-
-    import cv2
-    import numpy as np
-    from PIL import Image
-
-    # Decode the captured image
-    img_pil = Image.open(camera_image)
-    img_rgb = np.array(img_pil)
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-
-    # Build pipeline
-    detector = create_detector(
-        ModelConfig(model_path=cfg["model_path"], confidence=cfg["confidence"], use_mock=cfg["use_mock"]),
-        fallback_to_mock=True,
-    )
-    nav_engine = NavigationEngine()
-    haptics = HapticController()
-    simulator = VirtualNavigationSimulator()
-    audio = BrowserAudioFeedback(enabled=cfg["audio_on"])
-
-    # Run detection pipeline
-    detections = detector.detect(img_bgr)
-    enriched = nav_engine.enrich(detections, img_bgr.shape)
-    signal = haptics.generate(enriched)
-    readings = simulator.build_awareness(enriched, img_bgr.shape[1])
-    direction = simulator.suggested_direction(readings)
-
-    # Display annotated frame
-    annotated = annotate_frame(img_bgr, enriched)
-    _img(st, bgr_to_rgb(annotated), channels="RGB")
-
-    # Layout
-    col_info, col_sector = st.columns([5, 6])
-
-    with col_info:
-        mc = st.columns(2)
-        nearest = min(
-            (d.estimated_distance for d in enriched if d.estimated_distance is not None),
-            default=None,
-        )
-        mc[0].metric("Detections", len(enriched))
-        mc[1].metric("Nearest", f"{nearest:.1f} m" if nearest is not None else "clear")
-        mc[0].metric("Direction", _SHORT_DIRECTION.get(direction, direction.capitalize()))
-
-        # Warning banner
-        active_msgs = [d.message for d in enriched if d.message]
-        top_level = max(
-            (d.warning_level for d in enriched),
-            key=lambda lv: _LEVEL_ORDER.get(lv, 0),
-            default="none",
-        )
-        msg = " | ".join(active_msgs[:2])
-        if msg and top_level == "critical":
-            st.error(f"STOP — {msg}")
-        elif msg and top_level == "high":
-            st.warning(f"Warning — {msg}")
-        elif msg and top_level == "medium":
-            st.info(f"Caution — {msg}")
-        else:
-            st.success("Path clear")
-
-        # Haptic bars
-        st.caption("Haptic feedback")
-        l_pct = int(signal.left_intensity * 100)
-        r_pct = int(signal.right_intensity * 100)
-        st.progress(signal.left_intensity, text=f"Left motor — {l_pct}%")
-        st.progress(signal.right_intensity, text=f"Right motor — {r_pct}%")
-
-    with col_sector:
-        if readings:
-            _chart(st, build_sector_figure(readings))
-
-    # Detection table
-    with st.expander("Detection log", expanded=False):
-        _df(st, detection_table_rows(enriched))
-
-    # Browser TTS
-    spoken = audio.speak_detections(enriched)
-    pending = audio.drain_pending()
-    inject_browser_tts(pending)
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +363,7 @@ def _render_live_snapshot(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_live_synchronous(cfg: dict) -> None:
-    """Original synchronous frame-loop for simulation, file, and upload modes."""
+    """Synchronous frame-loop for simulation, file, and upload modes."""
 
     # Build layout placeholders
     camera_ph = st.empty()
@@ -484,12 +400,6 @@ def _render_live_synchronous(cfg: dict) -> None:
         )
     except RuntimeError as exc:
         st.error(f"Could not open video source: {exc}")
-        return
-
-    try:
-        require_cv2()
-    except RuntimeError as exc:
-        st.error(str(exc))
         return
 
     detector = create_detector(
@@ -545,13 +455,13 @@ def _render_live_synchronous(cfg: dict) -> None:
             # Warning banner
             msg = " | ".join(active_msgs[:2])
             if msg and top_level == "critical":
-                warn_ph.error(f"STOP — {msg}")
+                warn_ph.error(f"🛑 STOP — {msg}")
             elif msg and top_level == "high":
-                warn_ph.warning(f"Warning — {msg}")
+                warn_ph.warning(f"⚠️ Warning — {msg}")
             elif msg and top_level == "medium":
-                warn_ph.info(f"Caution — {msg}")
+                warn_ph.info(f"ℹ️ Caution — {msg}")
             else:
-                warn_ph.success("Path clear")
+                warn_ph.success("✅ Path clear")
 
             # Haptic progress bars
             l_pct = int(signal.left_intensity * 100)
@@ -603,7 +513,7 @@ def _render_live_synchronous(cfg: dict) -> None:
 def _show_idle_screen() -> None:
     st.markdown("---")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Input sources", "5", "Camera / Snapshot / Video / Upload / Sim")
+    c1.metric("Input sources", "4", "Camera / Video / Upload / Simulation")
     c2.metric("AI model", "YOLO11n", "Real-time detection")
     c3.metric("Object classes", "7", "Person, chair, stairs…")
     c4.metric("Feedback modes", "3", "Visual · Haptic · Audio")
@@ -615,12 +525,23 @@ def _show_idle_screen() -> None:
 # ---------------------------------------------------------------------------
 
 def _build_frame_iterator(source_mode, video_path, uploaded_path, max_frames):
-    if source_mode == "Video file":
-        src = VideoSource(parse_source(video_path or "0"))
-        return src, src.frames(max_frames=max_frames)
-    if source_mode == "Upload video" and uploaded_path:
-        src = VideoSource(uploaded_path)
-        return src, src.frames(max_frames=max_frames)
+    """Build a frame iterator for non-WebRTC modes."""
+    if source_mode in ("Video file", "Upload video"):
+        cv2 = _import_cv2()
+        if cv2 is None:
+            st.error("OpenCV is not available. Use Browser Camera or Simulation mode.")
+            return None, _sim_frames(max_frames)
+
+        from vision.camera import VideoSource, parse_source
+
+        if source_mode == "Video file":
+            src = VideoSource(parse_source(video_path or "0"))
+            return src, src.frames(max_frames=max_frames)
+        if source_mode == "Upload video" and uploaded_path:
+            src = VideoSource(uploaded_path)
+            return src, src.frames(max_frames=max_frames)
+
+    # Default: simulation
     return None, _sim_frames(max_frames)
 
 
@@ -755,7 +676,6 @@ directional warnings, haptic signals, and spoken alerts.
 | Mode | Description |
 |---|---|
 | Browser Camera | Real-time WebRTC stream from client device camera |
-| Browser Camera (Snapshot) | Frame-by-frame capture fallback |
 | Simulation | Synthetic frames with mock detections |
 | Video file | Process a local video file |
 | Upload video | Upload and process a video |
@@ -786,8 +706,8 @@ Centre-zone obstacles escalate one level earlier (−0.25 m bias).
 
 ### Deployment
 
-This app can be hosted on **Streamlit Cloud**, a **VPS**, or run locally.
-For remote deployment behind NAT, set these environment variables for TURN server:
+This app is hosted on **Streamlit Cloud** with browser-based camera access via WebRTC.
+For TURN server configuration (required behind strict NAT), set these secrets:
 - `TURN_URL` — e.g. `turn:your-server.com:3478`
 - `TURN_USERNAME`
 - `TURN_CREDENTIAL`
