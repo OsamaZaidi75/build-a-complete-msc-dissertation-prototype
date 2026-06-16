@@ -50,14 +50,6 @@ from vision.config import ModelConfig
 from vision.detector import create_detector
 from vision.synthetic import make_simulation_frame
 
-# Lazy cv2 import — not available on all cloud environments
-def _import_cv2():
-    try:
-        import cv2
-        return cv2
-    except ImportError:
-        return None
-
 # Optional WebRTC import
 _WEBRTC_AVAILABLE = False
 try:
@@ -129,12 +121,7 @@ def _build_sidebar() -> dict:
         source_options = []
         if _WEBRTC_AVAILABLE:
             source_options.append("Browser Camera")
-        source_options.append("Simulation")
-        cv2 = _import_cv2()
-        if cv2 is not None:
-            source_options.extend(["Video file", "Upload video"])
-        else:
-            source_options.append("Upload video")
+        source_options.extend(["Simulation", "Video file", "Upload video"])
 
         source_mode = st.selectbox("Input source", source_options)
         st.markdown("---")
@@ -527,12 +514,11 @@ def _show_idle_screen() -> None:
 def _build_frame_iterator(source_mode, video_path, uploaded_path, max_frames):
     """Build a frame iterator for non-WebRTC modes."""
     if source_mode in ("Video file", "Upload video"):
-        cv2 = _import_cv2()
-        if cv2 is None:
+        try:
+            from vision.camera import VideoSource, parse_source
+        except RuntimeError:
             st.error("OpenCV is not available. Use Browser Camera or Simulation mode.")
             return None, _sim_frames(max_frames)
-
-        from vision.camera import VideoSource, parse_source
 
         if source_mode == "Video file":
             src = VideoSource(parse_source(video_path or "0"))
