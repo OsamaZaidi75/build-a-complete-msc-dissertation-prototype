@@ -114,7 +114,7 @@ def ensure_venv() -> None:
 # ── Step 3: Install packages ───────────────────────────────────────────────
 def _packages_ready() -> bool:
     r = subprocess.run(
-        [str(VENV_PYTHON), "-c", "import streamlit, cv2, ultralytics"],
+        [str(VENV_PYTHON), "-c", "import streamlit, cv2, ultralytics, streamlit_webrtc, av"],
         capture_output=True,
     )
     return r.returncode == 0
